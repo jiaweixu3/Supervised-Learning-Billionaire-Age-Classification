@@ -89,5 +89,5 @@ Trained and compared a range of models with consistent preprocessing, partitioni
 ---
 
 ### 👥 Authors
-**Jiawei Xu**  
-**Iván López Anca**
+- **Jiawei Xu**  
+- **Iván López Anca**
