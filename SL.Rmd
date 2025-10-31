@@ -1,0 +1,1754 @@
+---
+title: "Supervised Learning. Billionaires."
+author: "Iván López Anca, Jiawei Xu"
+date: "UC3M, 2024"
+output:
+  html_document:
+    theme: flatly
+    highlight: pygments
+    toc: yes
+    toc_depth: 3
+    df_print: paged
+editor_options:
+  chunk_output_type: console
+---
+
+```{r global_options, include=T, echo = F}
+knitr::opts_chunk$set(echo = T, warning=FALSE, message=FALSE)
+```
+
+Removal of environment
+
+```{r}
+rm(list=ls())
+```
+
+# MOTIVATION
+
+Understanding the trends associated with billionaires is both fascinating and inspiring. Predicting whether a billionaire is an Adult or a Senior (over 65 years old) allows us to explore how age influences their wealth, industry preferences, and impact on the world.
+
+Age segmentation in this context can reveal interesting patterns, such as when wealth accumulation typically peaks, which industries favor younger or older individuals, and how experience gained with age contributes to success.
+
+In this project, our goal is to develop a model that predicts whether a billionaire falls into the Adult or Senior category. Beyond just making predictions, we aim to identify the most important factors that define these age groups, such as self-made status, industry type, or economic indicators from their home countries.
+
+This study is not just an academic exercise; it has real-world significance for economists and investors who want to better understand the life paths and societal contributions of the world’s most influential individuals.
+
+# 0. LIBRARIES AND PACKAGES
+
+```{r}
+if (!require(ggplot2)) install.packages("ggplot2")
+if (!require(dplyr)) install.packages("dplyr")
+if (!require(sf)) install.packages("sf")
+if (!require(readr)) install.packages("readr")
+if (!require(reshape2)) install.packages("reshape2")
+if (!require(gridExtra)) install.packages("gridExtra")
+if (!require(mice)) install.packages("mice")
+if (!require(VIM)) install.packages("VIM")
+if (!require(stringr)) install.packages("stringr")
+if (!require(tidyr)) install.packages("tidyr")
+if (!require(GGally)) install.packages("GGally")
+if (!require(MASS)) install.packages("MASS")
+if (!require(caret)) install.packages("caret")
+if (!require(e1071)) install.packages("e1071")
+if (!require(rpart)) install.packages("rpart")
+if (!require(rpart.plot)) install.packages("rpart.plot")
+if (!require(randomForest)) install.packages("randomForest")
+if (!require(pdp)) install.packages("pdp")
+if (!require(mlbench)) install.packages("mlbench")
+if (!require(lightgbm)) install.packages("lightgbm")
+if (!require(data.table)) install.packages("data.table")
+if (!require(fastshap)) install.packages("fastshap")
+if (!require(shapviz)) install.packages("shapviz")
+if (!require(pROC)) install.packages("pROC")
+if (!require(gbm)) install.packages("gbm")
+if (!require(glmnet)) install.packages("glmnet")
+
+
+if (!require(ROSE)) install.packages("ROSE")
+if (!require(RhpcBLASctl)) install.packages("RhpcBLASctl")
+if (!require(Matrix)) install.packages("Matrix")
+
+```
+
+```{r}
+# Load the necessary libraries
+library(ggplot2)
+library(dplyr)
+library(sf)
+library(readr)
+library(reshape2)
+library(gridExtra)
+library(mice)
+library(VIM)
+library(stringr)
+library(tidyr)
+library(GGally)
+library(MASS)
+library(caret)
+library(e1071)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(pdp)
+library(mlbench)
+library(lightgbm)
+library(data.table)
+library(fastshap)
+library(shapviz)
+library(pROC)
+library(gbm)
+library(glmnet)
+```
+
+# 1. DATA PREPROCESSING AND VISUALIZATION TOOLS
+
+## 1.1. Data Preprocessing
+
+```{r}
+data <- read.csv("billionaires.csv")
+str(data)
+summary(data)
+
+```
+
+We start doing some data preprocessing, removing variables that will not be used.
+<br>
+- city: it is redundant and too specific, for this purpose it is better to use country. 
+<br>
+- organization: too few observations do belong to an organization, so we may remove this variable.
+<br>
+- title: the title belongs to an organization.
+<br>
+- industries: we have the field category, so this is redundant.
+<br>
+- lastName and firstName: since we have the variable personName.
+<br>
+- date: irrelevant.
+<br>
+- state: the same as city.
+<br>
+- birthDay: too specific and irrelevant, we think the month or the year may be more interesting.
+<br>
+- cpi_change_country and cpi_country: gdp_country capture similar economical trends in a broader and more widely accepted manner.
+<br>
+- tax_revenue_country_country: we have total_tax_rate_country to know the tax rates a country has
+<br>
+- latitude_country and longitude_country: kinda irrelevant for our analysis, we may be more interested in the country itself than its coordinates.
+<br>
+- residenceStateRegion: the same as state and city.
+
+```{r}
+data <- data[, !names(data) %in% c("city", "organization", "title", "industries", "lastName", "firstName", "date", "state", "birthDay", "cpi_change_country", "cpi_country", "tax_revenue_country_country", "latitude_country", "longitude_country", "residenceStateRegion")]
+```
+
+We may rename some columns:
+
+```{r}
+names(data)[names(data) == "finalWorth"] <- "worth"
+names(data)[names(data) == "personName"] <- "name"
+names(data)[names(data) == "countryOfCitizenship"] <- "citizenship"
+names(data)[names(data) == "gross_tertiary_education_enrollment"] <- "tertiary_edu_country"
+names(data)[names(data) == "gross_primary_education_enrollment_country"] <- "primary_edu_country"
+names(data)[names(data) == "total_tax_rate_country"] <- "tax_rate_country"
+
+```
+
+### 1.1.1. Data Cleaning and Feature Engineering
+
+Check for duplicates (There are not):
+
+```{r}
+sum(duplicated(data)==TRUE)
+```
+
+We have seen that there are a few (1%) of missing values in the country field in our data, this is a irrelevant percentage of the data so we remove them to do a better classification, also we can not guess from which country they may be, so filling this with a "random country" would create a biased analysis.
+
+```{r}
+data$country[data$country == ""] = NA
+data <- data %>% filter(!is.na(country))
+```
+
+For our analysis the variable GDP would be interesting to be numerical, so with the package stringr we deal with this changes
+
+<br>
+
+Same for birthdate, which is has redundant misinformation about the hour
+
+```{r}
+data$gdp_country <- str_remove_all(data$gdp_country, "[$,]")
+data$gdp_country <- as.numeric(data$gdp_country)
+data$birthDate <- sub(" .*", "", data$birthDate)
+```
+
+### 1.1.2. Outliers
+
+Outliers are those values which seem to be badly introduced in our dataset, for recognizing them, the three sigma rule can be applied:
+
+```{r}
+
+numeric <- sapply(data, is.numeric)
+
+outliers <- sapply(data[, numeric], function(x) {
+  mu = mean(x, na.rm = TRUE)
+  sigma = sd(x, na.rm = TRUE)
+  sum(x < mu - 3*sigma | x > mu + 3*sigma, na.rm = TRUE)
+})
+outliers
+```
+
+We can see that there are outliers for many variables, however it is more visual to see them in the following plot:
+
+```{r}
+variables_with_outliers <- names(outliers[outliers > 0])
+numeric_data <- data[, variables_with_outliers]
+# we exclude birthyear from this boxplots as those values for which there will be NA's are the same values for which there is an NA in age, so the outliers can be seen as well properly
+numeric_data <- numeric_data[, !names(numeric_data) %in% "birthYear"]
+
+long_data <- gather(numeric_data, key = "variable", value = "value")
+
+ggplot(long_data, aes(x = variable, y = value, fill = variable)) + 
+  geom_boxplot(outlier.colour = "darkseagreen4", outlier.shape = 8, outlier.size = 3) +
+  labs(title = "Boxplots of Outliers by Variable", 
+       x = "Variables", y = "Values") +
+  coord_flip() +
+  scale_fill_brewer(palette = "YlGnBu") 
+
+```
+
+As seen before, we have some outliers which have to be checked for the accuracy of our analysis. Some of them seem to be actual data which is far away from the usual values. 
+
+#### 1.1.2.1. Age and Birthyear
+
+We will start with those variables with less outliers, which in this case are the age and the birthyear which obviously express the same. However, there could be some errors in our dataset, for that purpose, we will check the correlation before starting to deal with them
+
+```{r}
+ggplot(data, aes(x = age, y = birthYear)) +
+  geom_point(color="skyblue") +
+  ggtitle("Correlation") +
+  theme_minimal()
+data$birthYear <- NULL
+
+```
+
+As predicted, they are the same, so it is better to eliminate one of them, in this case, Birthyear
+
+```{r}
+mu_age = mean(data$age, na.rm = TRUE)
+sigma_age = sd(data$age, na.rm = TRUE)
+
+outliers_age = data %>%
+  filter(age < (mu_age - 3 * sigma_age) | age > (mu_age + 3 * sigma_age))
+
+outliers_age
+
+```
+
+The outliers for this variables are the information about two italian brothers who are much younger than this billionaires. We could deal with this outlier in two ways, searching on the internet if this values for the ages and birthdates are true or just assuming that as the selfmade variable states, this brothers have recieved the fortune of a familiar
+<br>
+
+[search](https://www.expansion.com/empresas/album/2023/11/23/655cd500e5fdea572b8b4616_2.html)
+
+<br>
+
+This data is right :D
+
+#### 1.1.2.2. Tertiary Education of the Country
+
+With this variable the situation is strange as not outliers are yeld on the boxplot.Let's plot the boxplot again to see what do we encounter
+
+```{r}
+ggplot(data, aes(x = tertiary_edu_country)) + 
+  geom_boxplot(outlier.colour = "red", outlier.shape = 8, outlier.size = 3, fill = "lightgreen")
+# still without outliers 
+mu_tertiary_edu_country = mean(data$tertiary_edu_country, na.rm = TRUE)
+sigma_tertiary_edu_country = sd(data$tertiary_edu_country, na.rm = TRUE)
+
+outliers_tertiary_edu_country = data %>%
+  filter(tertiary_edu_country < (mu_tertiary_edu_country - 3 * sigma_tertiary_edu_country) | tertiary_edu_country > (mu_tertiary_edu_country + 3 * sigma_tertiary_edu_country))
+
+outliers_tertiary_edu_country
+# three-sigma indicates three outliers for the terciary education in Greece with a value of 136.8. However, as there aren't any outliers in the boxplot, we'll check another way to see if the value of the tertiary education in Greece is an outlier or not
+
+Q1_tertiary_edu_country = quantile(data$tertiary_edu_country, 0.25, na.rm = TRUE)
+Q3_tertiary_edu_country = quantile(data$tertiary_edu_country, 0.75, na.rm = TRUE)
+IQR_tertiary_edu_country = Q3_tertiary_edu_country - Q1_tertiary_edu_country
+(Q3_tertiary_edu_country + 1.5 * IQR_tertiary_edu_country)
+```
+
+It is not an outlier even the three sigma rule indicates it because it is not bigger than Q3+IQR*1.5 
+
+#### 1.1.2.3. Tax-Rate of the Ccountry
+
+Taking into account the boxplots, aparently our outliers are above the data. So we will just check the outliers for the upper bound of the data
+
+```{r}
+Q1_tax_rate_country = quantile(data$tax_rate_country, 0.25, na.rm = TRUE)
+Q3_tax_rate_country = quantile(data$tax_rate_country, 0.75, na.rm = TRUE)
+
+# Calculate the IQR
+IQR_tax_rate_country = Q3_tax_rate_country - Q1_tax_rate_country
+
+# Identify low outliers (values below Q1 - 1.5 * IQR)
+high_outliers_tax_rate_country = data %>%
+  filter(tax_rate_country > (Q3_tax_rate_country + 1.5 * IQR_tax_rate_country))
+
+print(paste("Q3 + 1.5 * IQR =", Q3_tax_rate_country + 1.5 * IQR_tax_rate_country))
+high_outliers_tax_rate_country
+```
+
+[research](https://prosperitydata360.worldbank.org/en/indicator/WEF+TTCI+CORPTAXRATE) 
+<br>
+although seem to be extrange, this value for Argentina is right
+
+#### 1.1.2.4. Life Expectancy
+
+There are 9 outliers for this variables in which the expectancy is lower
+
+```{r}
+mu_life_expectancy_country  = mean(data$life_expectancy_country , na.rm = TRUE)
+sigma_life_expectancy_country  = sd(data$life_expectancy_country , na.rm = TRUE)
+
+outliers_life_expectancy_country  = data %>%
+  filter(life_expectancy_country  < (mu_life_expectancy_country - 3 * sigma_life_expectancy_country) | life_expectancy_country > (mu_life_expectancy_country + 3 * sigma_life_expectancy_country))
+
+outliers_life_expectancy_country[, c("country", "life_expectancy_country")]
+```
+
+This outliers seem to be from less desarrollated countries, however there could be errors as well. To do this we willl check for the data in internet. And unfortunately, they seem to be right :(we hope this life expectancy comes up in the following years)
+<br>
+[search](https://www.worldometers.info/demographics/life-expectancy/)
+
+#### 1.1.2.5. Primary Education Country 
+
+```{r}
+ggplot(data, aes(x = primary_edu_country)) + 
+  geom_boxplot(outlier.colour = "red", outlier.shape = 8, outlier.size = 3, fill = "lightgreen")
+```
+
+This values above 100 seem very extrange for us. As there cannot be a higher ratio than a 100, so we look for datasets about this until be found in the WHO the explanation for this values:
+
+<br>
+
+"All ratios are expressed as percentages and may exceed 100 because of early entry, repetition, and, for countries with almost universal education at a given level, whenever the actual age distribution of pupils" extends beyond the official school ages."
+
+<br>
+
+[search](https://www.who.int/data/gho/indicator-metadata-registry/imr-details/1142#:~:text=All%20ratios%20are%20expressed%20as,beyond%20the%20official%20school%20ages) 
+
+<br>
+
+Having considered this we check for both the high and low outliers
+
+```{r}
+Q1_primary_edu_country = quantile(data$primary_edu_country, 0.25, na.rm = TRUE)
+Q3_primary_edu_country = quantile(data$primary_edu_country, 0.75, na.rm = TRUE)
+
+# Calculate the IQR
+IQR_primary_edu_country = Q3_primary_edu_country - Q1_primary_edu_country
+
+# Identify low outliers (values below Q1 - 1.5 * IQR)
+low_outliers_primary_edu_country = data %>%
+  filter(primary_edu_country < (Q1_primary_edu_country - 1.5 * IQR_primary_edu_country))
+low_outliers_primary_edu_country = distinct(low_outliers_primary_edu_country[, c("country", "primary_edu_country")])
+# Identify high outliers (values above Q3+1.5*IQR)
+high_outliers_primary_edu_country = data %>%
+  filter(primary_edu_country > (Q3_primary_edu_country + 1.5 * IQR_primary_edu_country))
+high_outliers_primary_edu_country = distinct(high_outliers_primary_edu_country[, c("country", "primary_edu_country")])
+
+outliers_primary_edu_country <- rbind(low_outliers_primary_edu_country, high_outliers_primary_edu_country)
+```
+
+We found on the internet the following dataset from previous years in which we can compare to know if this values makes sense or not, as this variable cannot change abruptly from one year to the other. 
+<br>
+
+[dataset](https://tradingeconomics.com/country-list/school-enrollment-primary-percent-gross-wb-
+data.html)
+
+<br>
+We get just the values for the outliers and we check if they are right:
+
+```{r}
+educ <- read.csv("additional data/pri_data.csv")
+colnames(educ) <- c("country","value")
+educ <- educ %>%
+  filter(country %in% outliers_primary_edu_country$country)
+
+educ <- merge(educ, outliers_primary_edu_country, by = "country")
+
+ggplot(educ, aes(x = primary_edu_country, y = value, label = country)) +
+  geom_point(color = "lightblue", size = 4) + 
+  geom_text(aes(label = paste(value,"/", primary_edu_country )),
+            vjust = -0.5, color = "black", size = 2) +
+  labs(
+    title = "Comparison between datasets",
+    x = "OG data",
+    y = "internet value"
+  ) +
+  theme_minimal()
+```
+
+We get close values that make sense, so the data from our dataset is right :)
+
+#### 1.1.2.6. Worth
+
+```{r}
+Q1_worth = quantile(data$worth, 0.25, na.rm = TRUE)
+Q3_worth = quantile(data$worth, 0.75, na.rm = TRUE)
+
+# Calculate the IQR
+IQR_worth = Q3_worth - Q1_worth
+
+# Identify low outliers (values above Q3 + 1.5 * IQR)
+high_outliers_worth = data %>%
+  filter(worth > (Q3_worth + 1.5 * IQR_worth))
+
+print(paste("Q3 + 1.5 * IQR =", Q3_worth + 1.5 * IQR_worth))
+high_outliers_worth[, c("rank", "name", "worth")]
+
+```
+
+we can see that all values above the rank 232 are considered outliers for this variable, this might be because of the comparison of their worth taking into account all the millionaires. There are a lot of millionaires (2602) and this 232 are far richer than the other. That's why they are considered outliers.
+<br>
+Nevertheless, searching on the internet we have discovered this values are right. This 200 people are so rich that are considered extreme comparing to other billionaires! 
+[search](https://forbes.co/2024/04/12/editors-picks/las-50-personas-mas-ricas-del-mundo-2024)
+
+### 1.1.3. Missing Values
+
+We first check if there are "hidden missing values" as form of "" or " "
+
+```{r}
+print(sapply(data, function(x) sum(x == "")))
+print(sapply(data, function(x) sum(x == " ")))
+```
+
+We can see that it is not the case in the majority, but we do have some "" in birthDate and gdp_country. We may fix this.
+
+```{r}
+data[data == ""] <- NA
+```
+
+We may see how many NA's each variable has
+
+```{r}
+sapply(data, function(x) sum(is.na(x)))
+```
+
+Now we may identify the missing data and plot the missing data with ggplot
+
+```{r}
+# Identify missing data
+missing_data <- colMeans(is.na(data))
+print(missing_data)
+
+# Create a data frame with it
+missing_df = data.frame(
+  variable = names(missing_data),
+  missing_percentage = missing_data * 100)
+
+# Plot using ggplot2
+ggplot(missing_df, aes(x = reorder(variable, missing_percentage), y = missing_percentage)) +
+  geom_bar(stat = "identity", fill = "#698B69") +
+  labs(x = "Variable", y = "Missing Data Percentage", 
+       title = "Missing Data Percentages") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(hjust = 0.5))
+```
+
+We can see that there is not more than a 10% of missing values in any of our variables, which is great.
+<br>
+Now we may use the aggr function of the VIM library to also see the pattern of the missing data. But we may remove the variables with no missing values.
+
+```{r}
+# Data removing variables with no NA values
+
+data_missing = data[, missing_data>0]
+
+# Function to reset graphical parameters
+resetPar <- function() {
+  dev.new()                # Open a new graphics window
+  op <- par(no.readonly = TRUE)  # Save current graphical parameters
+  dev.off()                # Close the current graphics device
+  op                       # Return the saved parameters
+}
+
+# Reset graphical parameters
+par(resetPar())
+
+# Finally, plot with aggr function from VIM library
+aggr_plot <- aggr(data_missing, col=c('#EE3A8C', 'darkseagreen4'), numbers=TRUE, sortVars=TRUE,
+                  labels=names(data_missing), gap=3, cex.axis=0.5, cex.numbers=0.3,
+                  ylab=c("Histogram of missing data", "Pattern"))
+
+```
+
+Now we can see some patterns:
+<br>
+- tert_edu_country, life_exp_country and tax_rate_country have the same missing values, and prim_edu_country almost the same ones
+<br>
+- gdp_country and popul_country also have the same missing values
+<br>
+- as it could be supposed, birthDate, birthYear and birthMonth also have the same missing values, and whenever age has a missing value, these do as well.
+<br>
+Note that all of the variables which have missing values are numerical, except birthDate.
+<br>
+We may start dealing with the NAs in birthDate, birthYear and birthMonth, since we do want to do some analysis with the date of birth, instead of replacing with the median and possibly influentiating in the variability of the data, we may remove this rows.
+
+```{r}
+data <- data[!is.na(data$birthDate), ]
+```
+
+We may check what missing data do we have now:
+
+```{r}
+# Identify missing data
+missing_data <- colMeans(is.na(data))
+print(missing_data)
+
+# Create a data frame with it
+missing_df = data.frame(
+  variable = names(missing_data),
+  missing_percentage = missing_data * 100)
+
+# Plot using ggplot2
+ggplot(missing_df, aes(x = reorder(variable, missing_percentage), y = missing_percentage)) +
+  geom_bar(stat = "identity", fill = "darkseagreen4") +
+  labs(x = "Variable", y = "Missing Data Percentage", 
+       title = "Missing Data Percentages") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(hjust = 0.5))
+```
+
+We can see how, as predicted, the missing data from age, birthYear and birthMonth was removed too. To proceed with the other 6 variables with NAs, we will do a multi_variate imputation, with a random forest, using the MICE library.
+
+```{r}
+# Perform Random Forest imputation
+imputed_data<- mice(data, method = "rf", m = 5, seed = 33)
+
+# Inspect the imputed data (first dataset)
+data <- complete(imputed_data, 1)
+```
+
+### 1.1.4. Feature Engineering
+
+We set as factor those variables that may have a use in our classification:
+
+```{r}
+data$status <- as.factor(data$status)
+data$selfMade <- factor(data$selfMade, levels = c(FALSE, TRUE) , labels = c(0,1) )
+data$gender <- as.factor(data$gender)
+data$country <- as.factor(data$country)
+data$category <- as.factor(data$category)
+data$name <- as.factor(data$name)
+data$source <- as.factor(data$source)
+data$citizenship <- as.factor(data$citizenship)
+data$birthDate <- as.Date(data$birthDate, format = "%m/%d/%Y")
+```
+
+Our variables are in different scales (for example the comparison between the GDP and the worth) so we have to represent them in the same units.
+<br>
+For that we have checked in internet the equivalence between our dataset and the data:
+<br>
+- Worth: In the dataset, it is given in million of dollars, so represented in dollars, it would have to be multiplied by 10^6
+<br>
+-GDP: In the dataset, the GDP is already given in dollars
+<br>
+- Population: In the dataset, the population is given counting each single person
+<br>
+Having considered, all of this, we are going to express this three variables in terms of THOUSAND OF MILLIONS OF DOLLARS and MILLIONS OF PEOPLE
+<br>
+We round this values to better vizualization of the results
+
+```{r}
+data$worth <- data$worth / 10^3
+data$gdp_country <- round(data$gdp_country / 10^9,3)
+data$population_country <- round(data$population_country / 10^6, 3)
+```
+
+## 1.2. Visualization Tools
+
+We create a map to know the appearance of billionaires per country:
+
+```{r}
+num_reg <- data %>%
+  group_by(country) %>%
+  summarise(values = n())  #it counts the number of billionaires per country
+
+countries <- st_read("additional data/ne_10m_admin_0_countries.shp") # we load the map data
+
+data_map <- countries %>%
+  left_join(num_reg, by = c("NAME_LONG" = "country")) # we unite the data for each country
+
+ggplot(data_map) +
+  geom_sf(aes(fill = values), color = "white") +
+  theme_minimal() +
+  labs(
+    title = "Billionaires per country",
+    fill = "Number of billionaires"
+  )
+```
+
+We can see that the coutries with more billionaires are USA and China and that there are a lot of billionaires distributed all along Europe, America and Asia. It is also shoching that there are no values from Russia. It may be due to the lack of information before the conflict
+
+```{r}
+ggplot(data, aes(x = age)) +
+  geom_bar(fill = "darkseagreen4") +
+  labs(title = "Age distribution",
+       x = "Category", y = "Frequency") +
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+This plot shows an histogram about the distribution of the billionaires age, which is the variable we are going to predict, seeing that it follows almost a normal distribution where the median is around 65
+
+```{r}
+ggplot(data, aes(x = age, fill = selfMade)) +
+  geom_bar(position = "fill") +
+  labs(title = "Rich origin by age",
+       x = "Age", y = "Proportion") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7.5)) + scale_fill_manual(values = c("#EE3A8C", "darkseagreen4"))
+```
+
+From this plot we can see if the billionaires are that rich because of their work or because they have inhirited that amount of money, where 0 is NOT SELFMADE and 1 SELFMADE. We can see that the billionaires tend to be more selfmade and that there aren`t any significant differences between ages.
+
+```{r}
+ggcorr(data,label=T)
+```
+
+This plot shows the correlations between variables, seeing that there are not high nor low correlations between any variables. 
+<br>
+We remove the environment for the optimization and well understanding of it:
+
+```{r}
+rm(list = setdiff(ls(), "data"))
+```
+
+# 2. CLASSIFICATION - PREDICTION
+
+We are going to exclude the variables with more than 25 factors to the better performance of our models, as well as the birthdate:
+
+```{r}
+data2 <- data[, !(names(data) %in% c("name", "country", "source", "citizenship", "birthDate"))]
+
+```
+
+## 2.1. Regression
+
+Although we calculated it before, now, we calculate and plot the correlations for age because it is going to be used in regression:
+
+```{r}
+corr_age <- sort(cor(data2[, sapply(data2, is.numeric)])["age", ], decreasing = TRUE)
+corr <- data.frame(corr_age)
+
+
+ggplot(corr, aes(x = row.names(corr), y = corr_age)) + 
+  geom_bar(stat = "identity", fill = "darkseagreen4") + 
+  scale_x_discrete(limits = row.names(corr)) +
+  labs(x = "", y = "Correlation with Age", title = "Correlations with Age") + 
+  theme(plot.title = element_text(hjust = 0, size = rel(1.5)),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+From the plot we can see that this correlations aren't very high, as they don't even reach 0.20 nor positivily nor negatively
+
+### 2.1.1. Simple Regression
+
+We see if there is a linear relation between age and worth, seeing that there is not, as the data is very disperse (it could be seen before as well with the correlation)
+
+```{r}
+ggplot(data,aes(x=age, y= worth))+geom_jitter(color = "lightblue") +
+  labs(title = "Age vs. Worth" )
+```
+
+Done this, we know we will use a log-transformed age to see if the linear regression can be better done
+<br>
+Having said that, we are going to fit a lineal regression model predicting the log-transformed age based on the variable worth as it is the more correlated
+
+```{r}
+linFit <- lm(log(age + 1) ~ worth, data = data2)
+summary(linFit)
+```
+
+From the model we can see that:
+-Residual standard error: 0.2102 (2536 degrees of freedom).
+-Multiple R-squared: 0.00369, Adjusted R-squared: 0.003297.
+-F-statistic: 9.393 on 1 and 2536 DF, p-value = 0.002201.
+
+<br>
+We predict the fitted model and transform the predictions back to the original scale by applying the exponential function and subtracting 1, then we plot the correlation
+
+```{r}
+predictions <- exp(predict(linFit, newdata = data2)) - 1
+cor(data$age, predictions)^2
+```
+
+The squared correlation between the actual age and the predictions is 0.0039
+
+### 2.1.2. Multiple Regression
+
+Now we do multiple regression not by fitting the model based on the most correlated variable but basing it in all of them
+
+```{r}
+linFit <- lm(log(age + 1) ~ ., data = data2)
+summary(linFit)
+```
+
+Residual standard error: 0.1984; R^2 = 0.1235, Adjusted R^2 = 0.1119.
+F-statistic: 10.69 on 33 and 2504 DF, p-value < 2.2e-16 (model significant).
+<br>
+And now, as before, we predict this multiple regression
+
+```{r}
+pred.log <- predict(linFit, newdata = data2)
+cor(log(data$age + 1), pred.log)^2
+```
+
+R^2 = 0.1235. This value means the model explains about 12.35% of the variance in the log-transformed age variable.
+<br>
+For predictive models, an R^2 of 0.1235 is considered low, meaning the model has limited explanatory power.
+<br>
+Possible improvements could include adding more relevant predictors, however we tried with many of them and this values were also low.
+
+## 2.2. Data Partition and Bayes Classifiers
+
+We are going to choose as our target variable the age, but to do that, first we create three different factors depending on the age: 
+<br>
+Youth for those younger than 30
+<br>
+Adult for those billionaires between their thirties and sixties
+<br>
+Senior for the older than 65
+
+```{r}
+data2$age <- factor(ifelse(data$age < 30, "Youth", ifelse(data$age >= 65, "Senior", "Adult")))
+
+table(data2$age)
+
+```
+
+We can see that there are just 8 values for Youth, so we think it is better to aggregate them with the adults.
+
+```{r}
+data2$age <- factor(ifelse(data$age <= 65, "Adult", "Senior"))
+table(data2$age)
+str(data2)
+```
+
+Now we split the data into train and test groups. To do that we use the createDataPartition command which selects the 70% of the data as training.
+
+```{r}
+set.seed(123)
+
+spl <- createDataPartition(data2$age, p = 0.7 , list = FALSE) 
+
+train <- data2[spl,]
+test <- data2[-spl,]
+```
+
+### 2.2.1. Naives Bayes
+
+We train a Naives Bayes Model, making predictions on the test set, and evaluating the performance using a confusion matrix and overall accuracy.
+
+```{r}
+gnb.model <- naiveBayes(age ~ ., data = train)
+gnbPred <- predict(gnb.model, test)
+gnbCM <- confusionMatrix(gnbPred, test$age)
+gnb_accuracy <- confusionMatrix(gnbPred, test$age)$overall[1]
+gnbCM
+gnb_accuracy
+```
+
+Accuracy: 0.5585 (about 56% of the predictions were correct).
+<br>
+Confusion Matrix:
+<br>
+Adult predicted as Adult: 228, Adult predicted as Senior: 177
+<br>
+Senior predicted as Adult: 159, Senior predicted as Senior: 197 
+<br>
+The accuracy of 55.85% is moderate but indicates room for improvement.
+
+#### ROC for Naives Bayes
+
+We calculate the probabilities for the senior class, and a we plot the ROC curve to evaluate the model’s ability to distinguish between Adult and Senior.
+
+```{r}
+gnbProb <- predict(gnb.model, newdata = test, type = "raw")[,2]
+roc.gnb <- roc(test$age, gnbProb)
+roc.gnb
+par(bg = "white")
+plot.roc(test$age, gnbProb,col="cornsilk4", print.auc = TRUE,  auc.polygon=TRUE, grid=c(0.1, 0.2),
+         grid.col=c("green", "red"), max.auc.polygon=TRUE,
+         auc.polygon.col="cornsilk", print.thres=TRUE, legacy.axes = TRUE, main = "Naive Bayes ROC")
+```
+
+The Area Under the Curve (AUC) is 0.6125, indicating the model has moderate discriminatory ability between the "Adult" and "Senior" classes.
+<br>
+An AUC of 0.6125 suggests that while the model does better than random guessing, there is still significant room for improvement as AUC values closer to 1 represent better performance.
+
+### 2.2.2. LDA 
+
+Now, continuing with Naive Classifies, we train a Linear Discriminant Analysis (LDA) model on the train dataset with specified prior probabilities (50.815% Adult and 49.81% Senior) to capture separations between the two groups based on feature distributions
+
+```{r}
+table(data2$age)/nrow(data2)
+lda.model <- lda(age ~. , data=train)
+lda.model
+```
+
+Coefficients of Linear Discriminants (LD1):
+<br>
+Significant predictors: rank, worth, categoryMetals & Mining, categoryTechnology, statusN, genderM, and others.
+<br>
+Some coefficients like categoryMetals & Mining, categoryTechnology, statusN, and statusR show strong negative values, suggesting these categories heavily influence the distinction between Adults and Seniors.
+
+<br>
+Now we predict on the test set using the LDA model and we calculate the performance of the model
+
+```{r}
+ldaPred = predict(lda.model, newdata=test)$class
+CM_lda = confusionMatrix(ldaPred, test$age)$table
+accuracy_lda = confusionMatrix(ldaPred, test$age)$overall[1]
+CM_lda
+accuracy_lda
+```
+
+Confusion Matrix:
+<br>
+Adult predicted as Adult: 209, Adult predicted as Senior: 138
+<br>
+Senior predicted as Adult: 178, Senior predicted as Senior: 236
+<br>
+Accuracy: 0.5848 (58.48%)
+<br>
+Interpretation:
+<br>
+The model correctly predicts 58.48% of the cases, which better than in Naives but  moderate.
+<br>
+There are still errors, especially in predicting the correct class for "Senior" (178 predicted as "Adult").
+
+#### ROC for LDA
+
+Now we calculate the probabilities of the model at extracting the second values for posterior to create the ROC curve to assess the model’s ability to distinguish between Adult and Senior.
+
+```{r}
+ldaProb = predict(lda.model, newdata = test)$posterior[, 2]
+roc.lda <- roc(test$age, ldaProb)
+roc.lda
+
+plot.roc(test$age, ldaProb,col="cornsilk4", print.auc = TRUE,  auc.polygon=TRUE, grid=c(0.1, 0.2),
+         grid.col=c("green", "red"), max.auc.polygon=TRUE,
+         auc.polygon.col="cornsilk", print.thres=TRUE, legacy.axes = TRUE, main = "LDA ROC")
+```
+
+This curve is better than the Naive Bayes' but it isn't outstanding yet
+
+### 2.2.3. QDA
+
+Finishing with the Naive Classifiers, we train a Quadratic Discriminant Analysis (QDA) model on the train dataset again. It is set up to handle more complex class separations compared to LDA, leveraging differences in feature distributions for prediction
+
+```{r}
+qda.model <- qda(age ~ ., data=train)
+qda.model
+```
+
+Significant differences between Adults and Seniors in features like rank, worth, and various categories.
+<br>
+Categories such as categoryMetals & Mining, categoryTechnology, and statusN show noticeable differences between Adults and Seniors.
+<br>
+As in all this cases we predict on the test set in this case with the QDA model, evaluating again the performance of the model
+
+```{r}
+qdaPred = predict(qda.model, newdata=test)$class
+CM_qda = confusionMatrix(qdaPred, test$age)$table
+accuracy_qda = confusionMatrix(qdaPred, test$age)$overall[1]
+CM_qda
+accuracy_qda
+```
+
+Confusion Matrix:
+<br>
+Adult predicted as Adult: 234, Adult predicted as Senior: 156
+<br>
+Senior predicted as Adult: 153, Senior predicted as Senior: 218
+<br>
+Accuracy: 0.594 (59.4%) A little better than before but still not outstanding
+
+#### ROC for QDA
+
+Now we extract the probabilities from the QDA model to generate the ROC curve and assess the model's ability to distinguish between Adult and Senior.
+
+```{r}
+qdaProb = predict(qda.model, newdata = test)$posterior[, 2]
+roc.qda <- roc(test$age, qdaProb)
+roc.qda
+plot.roc(test$age, qdaProb,col="cornsilk4", print.auc = TRUE,  auc.polygon=TRUE, grid=c(0.1, 0.2),
+         grid.col=c("green", "red"), max.auc.polygon=TRUE,
+         auc.polygon.col="cornsilk", print.thres=TRUE, legacy.axes = TRUE,main = "QDA ROC")
+```
+
+AUC of 0.6297, which indicates that the QDA model has a moderate ability to distinguish between the "Adult" and "Senior" classes.
+
+<br>
+
+We have seen that the accuracies and the roc aren't very high. 
+<br>
+Applying subsampling techniques isn't very smart as the classes are very equalized
+<br>
+We have tried as well dealing with noise, eliminating it before (the factors)
+<br>
+There might be underfitting, however if it were, we think the accuracy would be even lower.
+<br>
+We will try other models:
+
+## 2.3. Machine Learning tools
+
+### 2.3.1. Decision trees
+
+Now it's time to start with the machine learning tools. 
+<br>
+First, we deal with decision trees at using a decision tree model to predict the age category based on the features.
+<br>
+For doing that, we build the tree with specific parameters to control its depth and complexity, optimizing performance and avoiding overfitting.
+
+```{r}
+# Hyper-parameters
+control = rpart.control(minsplit = 20, maxdepth = 15, cp = 0.005)
+```
+
+```{r}
+tree_model = age ~.
+dtFit <- rpart(tree_model, data=train, method = "class", control = control)
+summary(dtFit)
+```
+
+The tree has 14 splits with a relative error decreasing from 1.00 to 0.591 after all splits.
+<br>
+The most important predictor are "population_country" (24%), "tax_rate_country" and "primary_edu_country" (16% each), while other features have lower importance.
+<br>
+For each node in the tree, the number of examples reaching the decision point is listed
+<br>
+Now it's time to plot the tree to visualize the tree because the previous result might be a bit difficult to understand.
+
+```{r}
+rpart.plot(dtFit, digits=3)
+```
+
+Each node shows:
+
+- the predicted class
+- the predicted probability of each class
+- the percentage of observations in the node
+
+<br>
+
+Finally, we evaluate the model's performance using a confusion matrix and computing its accuracy.
+
+```{r}
+dtPred <- predict(dtFit, test, type = "class")
+
+levels(test$age) <- levels(dtPred)
+CM_dt = confusionMatrix(factor(dtPred), test$age)$table
+CM_dt
+accuracy_dt = confusionMatrix(factor(dtPred), test$age)$overall["Accuracy"]
+accuracy_dt
+```
+
+Accuracy = 61.63%, which is a moderate result and indicates the model can distinguish between "Adult" and "Senior" classes.
+<br>
+Confusion matrix reveals 292 misclassifications (122 "Adult" as "Senior" and 170 "Senior" as "Adult")
+<br>
+And now we use caret and cross validation to create it. 
+
+```{r}
+caret.fit <- train(tree_model, 
+                   data = train, 
+                   method = "rpart",
+                   control=rpart.control(minsplit = 20, maxdepth = 15, cp= 0.005),
+                   trControl = trainControl(method = "cv", number = 5),
+                   tuneLength=10)
+
+caret.fit
+```
+
+The accuracies are higher so we will keep this tree and plot it right here:
+
+```{r}
+rpart.plot(caret.fit$finalModel)
+best_model <- caret.fit$finalModel
+```
+
+### 2.3.2. Random Forest
+
+Now it's time to model with random forest to make our predictions about this ages and their categories 
+
+```{r}
+rf.train <- randomForest(age ~., 
+                         data = train)
+```
+
+Same as before, predict on the test data to see the accuracy of our model
+
+```{r}
+rf.pred <- predict(rf.train, newdata=test)
+confusionMatrix(rf.pred, test$age)
+```
+
+The accuracy is of 0.6347 and there is as well misclassification of people at the confusion matrix. For now it's the best model four our data
+<br>
+We repeat the randomForest with cross validation for the improval of our model thanks to the hyperparameters
+
+```{r}
+ctrl <- trainControl(method = "cv",
+                     number = 10, 
+                     classProbs = TRUE,  
+                     summaryFunction = twoClassSummary)
+rf.train <- train(age ~., 
+                  method = "rf", 
+                  data = train,
+                  preProcess = c("center", "scale"),
+                  ntree = 200,
+                  cutoff=c(0.7,0.3),
+                  tuneGrid = expand.grid(mtry=c(6,8,10)),
+                  maximize = F,
+                  trControl = ctrl)
+```
+
+```{r}
+rf_imp <- varImp(rf.train, scale = F)
+plot(rf_imp, scales = list(y = list(cex = .95)))
+```
+
+We get the rank is the most important variable, followed by worth, birthmonth...
+<br>
+Not it is time to predict on the test values and see how it works.
+
+```{r}
+rfPred = predict(rf.train, newdata=test)
+rf_CM = confusionMatrix(factor(rfPred), test$age)$table
+accuracy_rf = confusionMatrix(factor(rfPred), test$age)$overall["Accuracy"]
+rf_CM
+accuracy_rf
+```
+
+Although we have changed the hyperparameters, the accuracy isn't improved.
+
+### 2.3.3. Gradient Boosting
+
+Now it's time for doing a gradient boosting model for predicting the age in the dataset train using many hyperparameters with a normal distribution, 250 trees, 2 as the maximal depth of the tees and the minimum number of observations of a terminal node 
+<br>
+Then we predict on the test set
+
+```{r}
+trainGBM <- train
+testGBM <- test
+trainGBM$age <- ifelse(train$age == "Senior", 1, 0)
+testGBM$age <- ifelse(test$age == "Senior", 1, 0)
+GBM.train <- gbm(age ~ ., 
+                 data = trainGBM, 
+                 distribution = "bernoulli", 
+                 shrinkage = 0.01, 
+                 interaction.depth = 2, 
+                 n.minobsinnode = 8)
+
+gbmPred <- predict(GBM.train, newdata = testGBM, type = "response")
+gbmPred <- factor(ifelse(gbmPred > 0.5, "Senior", "Adult"), levels = levels(test$age))
+
+gbmCM = confusionMatrix(gbmPred, test$age)$table
+accuracy_gbm = confusionMatrix(gbmPred, test$age)$overall["Accuracy"]
+gbmCM
+accuracy_gbm
+```
+
+Accuracy of 61% aproximately, very low. Same as before
+<br>
+Now we choose a set of hyperparameters to train and evaluate thisXGBoost model with many diferent values for each hyperparameter:
+
+```{r}
+xgb_grid <- expand.grid(
+  nrounds = c(500, 700),
+  eta = 0.01, 
+  max_depth = c(2, 4),
+  gamma = 1,
+  colsample_bytree = c(0.2, 0.3),
+  min_child_weight = c(1, 3),
+  subsample = 1
+)
+```
+
+Now with all those combination of hyperparameters, we train the model doing also a cross validation to have the best possible performance:
+
+```{r}
+
+ctrl <- trainControl(method = "cv", number = 5, verboseIter = TRUE)
+
+
+xgb.train <- train(age ~ ., 
+                   data = train, 
+                   trControl = ctrl, 
+                   tuneGrid = xgb_grid, 
+                   preProcess = c("center", "scale"), 
+                   method = "xgbTree",
+                   maximize = FALSE)
+```
+
+Having done all of this, we get the importance of variables for the model:
+
+```{r}
+xgb_imp <- varImp(xgb.train, scale = FALSE)
+plot(xgb_imp, scales = list(y = list(cex = .95)))
+```
+
+From this plot we can see that the importance of variables have changed, being population_country followed by the primary and the terciary education
+<br>
+Now as before we predict the age on the test set and get the evaluation of the performance:
+
+```{r}
+xgbPred <- predict(xgb.train, newdata = test)
+xgbPred
+xgb_CM <- confusionMatrix(factor(xgbPred), factor(test$age))$table
+xgb_CM
+xgb_accuracy = confusionMatrix(factor(xgbPred), test$age)$overall["Accuracy"]
+xgb_accuracy
+```
+
+However the accuracy is worse than before, with a 61,5% and also many misclassifications in the Confusion Matrix. 93 seniors which are considered as adulrs and 200 adults considered as senior
+
+## 2.4. Subsampling Techniques
+
+We will use the hybrid method rose since it ensures a more diverse data point, and avoids the potential overfitting risk associated with simpler oversampling methods such as SMOTE. 
+
+```{r}
+ctrl$sampling <- "rose"
+```
+
+Train the model.
+
+```{r}
+
+rf.train <- randomForest(age ~., 
+                         data = train,
+                         trControl = ctrl)
+```
+
+Prediction.
+
+```{r}
+threshold = 0.2
+rfPred = predict(rf.train, newdata=test)
+CM = confusionMatrix(factor(rfPred), test$age)$table
+CM
+accuracy = confusionMatrix(factor(rfPred), test$age)$overall["Accuracy"]
+accuracy
+```
+
+## 2.5. Logistic regression
+
+Our last classification model for prediction will be logistic regression. We will use binomial logistic regression. If the age contained one or more levels, it would be needed to do multinomial or ordinal logistic regression
+
+```{r}
+logit.model <- glm(age ~ ., family = binomial(link = 'logit'), data = train)
+summary(logit.model)
+```
+
+Significant variables include primary_edu_country, tax_rate_country, population_country, gdp_country, and life_expectancy_country, with p-values below 0.05. 
+<br>
+The model's residual deviance (2242.6) suggests good fit, with an AIC of 2310.6.
+<br>
+Several predictors, such as worth and categoryFood & Beverage, were not significant in predicting age.
+<br>
+Make predictions ang get the probability for the ROC:
+
+```{r}
+lgmProb <- predict(logit.model,newdata=test, type='response')
+head(lgmProb)
+lgmPred <- as.factor(ifelse(lgmProb > 0.5,"Senior","Adult"))
+head(lgmPred)
+```
+
+Check performance
+
+```{r}
+levels(test$age) <- levels(lgmPred)
+lgmCM = confusionMatrix(lgmPred, test$age)
+accuracy_lgm = confusionMatrix(factor(lgmPred), test$age)$overall["Accuracy"]
+
+levels(test$age)<-c("Adult","Senior")
+lgmCM
+accuracy_lgm
+```
+
+The logistic regression model has an accuracy of 58.48%. Sensitivity (for "Senior") is 54.26%, and specificity (for "Adult") is 62.83%. The Kappa value of 0.17 suggests low agreement beyond chance. McNemar's test shows a significant difference between false positives and negatives. Balanced accuracy is 58.55%, indicating moderate performance, as before, which means there is definetly something happening, however we don't have the techniques to improve it.
+
+### 2.5.1. Penalized logistic regression 
+
+IT MIGHT NOT WORK FOR LAST'S RSTUDIO VERSION!!!!
+
+We train a Lasso logistic regression model to predict "age" (Adult vs Senior). We first prepare the training data by creating a feature matrix and binary target variable. 
+<br>
+Then, we use cross-validation to select the optimal regularization parameter, to fit the final model
+
+```{r}
+X_train <- as.matrix(train[, -which(names(train) == "age")])
+y_train <- as.numeric(train$age == "Senior")
+
+lasso_model <- glmnet(X_train, y_train, family = "binomial", alpha = 1)
+
+cv_lasso <- cv.glmnet(X_train, y_train, family = "binomial", alpha = 1)
+best_lambda <- cv_lasso$lambda.min
+
+final_lasso_model <- glmnet(X_train, y_train, family = "binomial", alpha = 1, lambda = best_lambda)
+
+X_test <- as.matrix(test[, -which(names(test) == "age")])
+lasso_prob <- predict(final_lasso_model, s = best_lambda, newx = X_test, type = "response")
+lasso_pred <- ifelse(lasso_prob > 0.5, "Senior", "Adult")
+
+confusionMatrix(as.factor(lasso_pred), test$age)
+
+```
+
+However the performance is worse than before so we'll trust the not penalized logistic regression.
+
+#### ROC for Logistic Regression
+
+```{r}
+roc.glm <- roc(test$age,lgmProb)
+
+plot.roc(test$age, lgmProb,col="cornsilk4", print.auc = TRUE,  auc.polygon=TRUE, grid=c(0.1, 0.2),
+         grid.col=c("green", "red"), max.auc.polygon=TRUE,
+         auc.polygon.col="cornsilk", print.thres=TRUE, legacy.axes = TRUE)
+```
+
+AUC = 0.626. Same as before, low but not as low as random would be
+
+### 2.5.2. With Benchmark
+
+We have many predictors, hence our benchmark will be penalized logistic regression
+
+```{r}
+set.seed(100)
+ctrl <- trainControl(method = "cv", number = 5,
+                     classProbs = TRUE, 
+                     verboseIter=T)
+
+
+lrFit <- train(age ~ ., 
+               method = "glmnet",
+               tuneGrid = expand.grid(alpha = seq(0, 1, 0.1), lambda = seq(0, .1, 0.02)),
+               metric = "Kappa",
+               data = train,
+               preProcess = c("center", "scale"),
+               trControl = ctrl)
+lrFit
+```
+
+We are not going to take this values because as before, dealing with the lastest version of R was a little bit problematic with this exercise
+
+## 2.6. Ensemble Learning
+
+Create ensemble for classification: mode function
+
+```{r}
+mode <- function(v) {
+  uniqv <- unique(v)
+  uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+```
+
+We do the prediction
+
+```{r}
+ensemble.pred = apply(data.frame(ldaPred,qdaPred,lgmPred,dtPred,gbmPred, xgbPred, rfPred), 1, mode) 
+ensembleCM = confusionMatrix(factor(ensemble.pred), test$age)$table
+ensembleCM
+ensemble_accuracy = confusionMatrix(factor(ensemble.pred), test$age)$overall["Accuracy"]
+ensemble_accuracy
+```
+The accuracy for this mixture of predictions is not very high neither, and there are a few more misclassifications that in other models, so for now we will trust our random forest
+
+## 2.7. ROC 
+
+We have been doing the rocs all along our work, now it's time to compare them
+
+```{r}
+auc.glm <- auc(roc.glm)
+auc.lda <- auc(roc.lda)
+auc.qda <- auc(roc.qda)
+auc.gnb <- auc(roc.gnb)
+
+sort(c(auc.glm = auc.glm,auc.lda = auc.lda,auc.qda = auc.qda,auc.gnb = auc.gnb),decreasing=TRUE)
+
+```
+
+The best roc is the given by the qda, so it's the one which performs the work better.
+
+## 2.8. Selecting the optimal threshold to decide if Senior or not.
+
+```{r}
+set.seed(13)
+
+profit.i <- matrix(NA, nrow = 50, ncol = 10)
+
+thresholds <- seq(0.05, 0.5, 0.05)
+
+profit.unit <- c(Adult = 1, Senior = -1)
+
+for (j in seq_along(thresholds)) {
+  threshold <- thresholds[j]
+  
+  for (i in 1:50) {
+    # Split the data into training (40%) and testing (60%) sets
+    d <- createDataPartition(data2$age, p = 0.4, list = FALSE)
+    train <- data2[d, ]
+    test <- data2[-d, ]
+    
+    # Fit a logistic regression model
+    full.model <- glm(age ~ ., data = train, family = binomial(link = "logit"))
+    
+    # Predict probabilities on the test set
+    probability <- predict(full.model, test, type = "response")
+    
+    # Make predictions based on the current threshold
+    age.pred <- ifelse(probability > threshold, "Senior", "Adult")
+    
+    # Generate the confusion matrix
+    CM <- confusionMatrix(factor(age.pred, levels = c("Adult", "Senior")), test$age)$table
+    
+    # Calculate profit per applicant
+    profit.applicant <- sum(profit.unit * CM) / sum(CM)
+    profit.i[i, j] <- profit.applicant
+  }
+}
+```
+
+```{r}
+# Summarize results
+colnames(profit.i) <- thresholds
+
+# Plot results
+boxplot(profit.i, main = "Hyper-parameter selection: Threshold",
+        ylab = "Unit profit",
+        xlab = "Threshold",
+        names = thresholds,
+        col = "skyblue")
+```
+
+In the graph we can see how a lower threshold results in more predictions as Senior and a higher threshold in fewer Senior predictions. We can observe that as the threshold increases, the variability does it as well, resulting in wider boxplots and longer whiskers.
+
+<br>
+
+Since we want to get more consistent results, with lower variability, we shall choose a threshold where the boxplot is narrower. Therefore, the optimal choice is 0.5, since not only does it have the highest profitability but also a good IQR.
+
+```{r}
+apply(profit.i, 2, median)
+```
+
+## 2.9. Final prediction for testing set using the optimal hyper-parameter
+
+```{r}
+log.model <- glm(age ~ ., data = train, family = binomial(link = "logit"))
+
+probability <- predict(log.model, test, type = "response")
+
+threshold <- 0.5
+
+Cred.pred <- ifelse(probability > threshold, "Senior", "Adult")
+
+CM <- confusionMatrix(factor(Cred.pred, levels = c("Adult", "Senior")), test$age)$table
+print(CM)
+
+profit.unit <- c(Adult = 1, Senior = -1)  # Profit for correct classifications
+
+profit.applicant <- sum(profit.unit[names(profit.unit) == rownames(CM)] * CM) / sum(CM)
+
+profit.applicant
+```
+
+As we can see our prediction is a little biased to classify as Adult since the profit margin is positive. 
+
+# 3. CLASSIFICATION - INTERPRETATION
+
+We remove the environment for the optimization and well understanding of it:
+
+```{r}
+rm(list = setdiff(ls(), "data"))
+```
+
+Now we do some data processing.
+
+```{r}
+data3 <- data[, !(names(data) %in% c("name", "country", "source", "citizenship", "birthDate"))]
+data3$age <- factor(ifelse(data$age <= 30, "Youth", 
+                           ifelse(data$age <= 65, "Adult", "Senior")))
+
+table(data3$age)
+```
+
+There are only 11 youth so we may merge them with Adult.
+
+```{r}
+data3$age <- factor(ifelse(data$age <= 65, "Adult", "Senior"))
+table(data3$age)
+str(data3)
+```
+
+More balanced
+
+## 3.1. RF model
+
+```{r}
+set.seed(123)
+
+model <- randomForest(age ~ ., 
+                      data = data3, 
+                      importance = TRUE,
+                      ntree = 100)
+
+# Print model summary
+print(model)
+```
+
+It gives us a kinda high error rate.
+
+### 3.1.1. RF Feature Importance Plot
+
+```{r}
+importance_df <- data.frame(
+  Feature = row.names(importance(model)),
+  Importance = importance(model)[, 'MeanDecreaseGini']
+)
+
+# Plot Feature Importances:
+
+ggplot(importance_df, 
+       aes(x = reorder(Feature, Importance), 
+           y = Importance)) +
+  geom_bar(stat = 'identity', fill = 'steelblue') +
+  coord_flip() +
+  ggtitle('Feature Importances from Random Forest') +
+  xlab('') +
+  ylab('Mean Decrease in Gini') +
+  theme_minimal()
+```
+
+The features at the top such as rank, worth or birthMonth are the ones that have the higher importance and contribute more to the model's decision-making process.
+
+### 3.1.2. RF Partial Dependence Plots
+
+A partial dependence plot shows the relationship between a feature and the predicted outcome, averaging out the effects of other features.
+
+```{r}
+# Generate Partial Dependence Plot for Rank
+pdp_plot <- partial(model, pred.var = "rank", grid.resolution = 20, prob = TRUE, which.class = 2)
+
+# Plot the Partial Dependence Plot
+autoplot(pdp_plot, rug = TRUE, train = data3) +
+  ggtitle('Partial Dependence Plot for Rank') +
+  xlab('Rank') +
+  ylab('Predicted Probability of Age') +
+  theme_minimal()
+```
+
+In this plot we can see how the predicted probability of age changes with the rank, being generally true, that the higher the rank (1 is the highest) the higher the age. So, we can assume that older people is generally richer.
+
+```{r}
+# Generate Partial Dependence Plot for worth
+pdp_plot_worth <- partial(model, pred.var = "worth", grid.resolution = 20, prob = TRUE, which.class = 2)
+
+# Plot the Partial Dependence Plot for worth
+autoplot(pdp_plot_worth, rug = TRUE, train = data3) +
+  ggtitle('Partial Dependence Plot for Worth') +
+  xlab('Worth') +
+  ylab('Predicted Probability of Age') +
+  theme_minimal()
+
+```
+
+We can see that worth doesn't really affect on age prediction, this could be since most billionaires have similar worth values.
+
+```{r}
+# Generate Partial Dependence Plot for primary_edu_country
+pdp_plot_primary_edu_country <- partial(model, pred.var = "primary_edu_country", grid.resolution = 20, prob = TRUE, which.class = 2)
+
+# Plot the Partial Dependence Plot for primary_edu_country
+autoplot(pdp_plot_primary_edu_country, rug = TRUE, train = data3) +
+  ggtitle('Partial Dependence Plot for Primary Education Country') +
+  xlab('Primary Education Country') +
+  ylab('Predicted Probability of Age') +
+  theme_minimal()
+```
+
+From the plot, we can observe that countries with higher primary education levels tend to have a higher predicted probability of billionaires being senior. This suggests that primary education levels in a country may be associated with seniors among billionaires, probably due to economic development and wealth accumulation.
+
+## 3.2. SHAP Values
+
+```{r}
+# Define the prediction function
+pred_function <- function(model, newdata) {
+  predict(model, newdata, type = "prob")[, "Senior"] 
+}
+
+X <- data3[, !names(data3) %in% "age"]
+Y <- data3$age
+
+set.seed(123) 
+
+# Calculate SHAP values
+shap_values <- explain(
+  object = model,      
+  X = X,               
+  pred_wrapper = pred_function, 
+  nsim = 50            
+) # takes a little time!
+
+# View the SHAP values
+head(shap_values)
+
+```
+
+### 3.2.1. SHAP Summary Plot
+
+```{r}
+long_shap <- melt(shap_values)
+
+# SHAP summary plot
+ggplot(long_shap, aes(x = value, y = Var2)) +
+  geom_violin(fill = "#9F79EE") +
+  ggtitle("SHAP Values for Random Forest Model") +
+  xlab("SHAP value (impact on model output)") +
+  ylab("Feature") +
+  theme_minimal()
+```
+
+The plot shows how each feature contributes to the model output. Wider distributions indicate more variability in feature impact. The center of the distribution around zero such as gender, suggests neutral effect.
+
+### 3.2.2. SHAP Feature Importance Plot
+
+```{r}
+# Compute mean absolute SHAP values
+mean_abs_shap <- colMeans(abs(shap_values))
+
+# Create a data frame for plotting
+shap_importance <- data.frame(
+  Feature = names(mean_abs_shap),
+  MeanAbsShap = mean_abs_shap
+)
+
+# Plot SHAP feature importance
+ggplot(shap_importance, aes(x = reorder(Feature, MeanAbsShap), y = MeanAbsShap)) +
+  geom_bar(stat = 'identity', fill = 'mistyrose3') +
+  coord_flip() +
+  ggtitle('Feature Importance based on Mean Absolute SHAP Values') +
+  xlab('') +
+  ylab('Mean |SHAP value|') +
+  theme_minimal()
+```
+
+Features with higher abs SHAP values have greater impact on the model's predictions. Here we can see how rank or worth still have great importance, but the one that impacts the most is population_country
+
+### 3.2.3. SHAP Dependence Plots
+
+```{r}
+# Convert SHAP values to a data frame
+shap_values <- as.data.frame(shap_values)
+
+# Create a SHAP dependence plot for 'rank'
+ggplot(data = data.frame(
+  SHAP_value = shap_values$rank,
+  Feature_value = X$rank
+), aes(x = Feature_value, y = SHAP_value)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "loess", se = FALSE, color = "turquoise2") +
+  ggtitle('SHAP Dependence Plot for Rank') +
+  xlab('Rank') +
+  ylab('SHAP Value') +
+  theme_minimal()
+
+```
+
+This plot shows the relationship between Rank and its impact on prediction. The shap values gradually decrease as the rank value (being 1 the higher) decreases, therefore we can assume, as previously with the RF method, that older people have higher ranks. 
+
+```{r}
+# Create a SHAP dependence plot for 'primary_edu_country'
+ggplot(data = data.frame(
+  SHAP_value = shap_values$primary_edu_country,
+  Feature_value = X$primary_edu_country
+), aes(x = Feature_value, y = SHAP_value)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "loess", se = FALSE, color = "#EE5C42") +
+  ggtitle('SHAP Dependence Plot for Primary Education in Country') +
+  xlab('Primary Education in Country') +
+  ylab('SHAP Value') +
+  theme_minimal()
+
+```
+
+Here, the relation is clearly non-linear.
+<br>
+The initial rise might reflect a correlation between high access to primary education in a country and better overall societal well-being, leading to an older population.
+<br>
+The decline at very high primary education levels could reflect diminishing marginal returns in countries where primary education levels  are too high, possibly due to demographic factors.
+
+## 3.3. Local Interpretability
+
+Using lightgbm.
+
+```{r}
+# Prepare target and features
+y_l <- as.numeric(data3$age == "Senior")  # Binary target: "Senior" = 1, "Adult" = 0
+X_l <- data3[, -which(names(data3) == "age")]  # Exclude the target variable
+
+# Ensure all columns in X_l are numeric
+X_l <- data.matrix(X_l)
+```
+
+Train the model.
+
+```{r}
+gbm_light <- lightgbm(
+  data = X_l,
+  label = y_l,
+  params = list(
+    num_leaves = 4L,
+    learning_rate = 0.1,
+    objective = "binary"
+  ),
+  nrounds = 50L, 
+  verbose = -1L
+)
+```
+
+Now, we need to construct a observation for a new billionaire, since we need an observation to predict.
+
+```{r}
+new_billionaire <- data.frame(
+  rank = 13,
+  worth = 70,  
+  category = factor("Finance & Investments", levels = levels(data3$category)),
+  selfMade = factor("1", levels = levels(data3$selfMade)),
+  status = factor("D", levels = levels(data3$status)),
+  gender = factor("M", levels = levels(data3$gender)),
+  birthMonth = 7,  
+  gdp_country = 20000,  
+  tertiary_edu_country = 91,  
+  primary_edu_country = 103, 
+  life_expectancy_country = 83,  
+  tax_rate_country = 47, 
+  population_country = 300 
+)
+```
+
+Probabilities ad prediction for new billionaire
+
+```{r}
+gbmProb_new = predict(gbm_light, 
+            newdata = data.matrix(new_billionaire))
+threshold = 0.5
+gbmPred_new = "Adult"
+gbmPred_new[which(gbmProb_new > threshold)] = "Senior"
+```
+
+Average prediction is:
+
+```{r}
+gbmProb_all = predict(gbm_light, 
+            newdata = X_l)
+threshold = 0.5
+gbmPred_all = rep("Adult", nrow(data3))
+gbmPred_all[which(gbmProb_all > threshold)] = "Senior"
+```
+
+We can compare the average prediction to the new billionaire's prediction, and we can see that our prediction is higher than the average.
+
+```{r}
+baseline = mean(gbmProb_all)
+cat("Average probability: ", baseline, "\n")
+prnew = gbmProb_new
+cat("New Billionaire's: ", prnew, "\n")
+```
+
+To explain this high probability, we may use the Shapley values for each feature's contribution to the prediction.
+
+```{r}
+set.seed(123)  # For reproducibility
+
+pfun <- function(object, newdata) {
+  predict(object, newdata = newdata)
+}
+
+ex_new <- fastshap::explain(
+  gbm_light,
+  X = X_l,
+  pred_wrapper = pfun,
+  newdata = data.matrix(new_billionaire),
+  nsim = 1000,
+  adjust = TRUE
+)
+
+print(ex_new)
+```
+
+Features such as Rank, Worth or Status have a positive impact on the billionaire being Senior, while other like the Education of the country (Both, Primary and Tertiary) or the life_expectancy have a negative effect (push the prediction to be Adult).
+
+<br>
+
+Sanity Check
+
+```{r}
+sum(ex_new)
+```
+
+Waterfall chart to visualize how the new billionaire's features contributed to the probability of being Senior.
+
+```{r}
+shv <- shapviz(ex_new, X = new_billionaire, baseline = baseline)
+sv_waterfall(shv)
+```
+
+Force plots to visualize the explanation.
+
+```{r}
+sv_force(shv)
+```
+
+We can see how the the most influential features are the category and the population of the country, which significantly increases the prediction. The rank has also a moderate impact and the life_exp of the country slightly reduces out prediction.
+
+# 4. FEATURE SELECTION AND COMPARISON OF PREDICTOR SETS
+
+## 4.1. Feature Selection
+
+After the classification focused on interpretation, we could see which were the most important variables, which were category, rank, worth, population_country, the primary education and the rate. Also, features such as gender, selfMade of birthMonth are irrelevant. Therefore, the features we should select are overall the ones mentioned at the beginning. 
+
+<br>
+
+This could also be seen in the waterfall plot, were rank and population_country affected enourmously on t he result of the prediction, while the rest didn't really.
+
+
+## 4.2. Comparison of Predictor Sets
+
+In the prediction part we have been comparing all the predictor sets while we were doing it. Having said this, we state that our best prediction model is the random forest because of the accuracy, however, here we will order the prediction models by accuracy and AUC as explained before:
+<br>
+1.Random Forest - AC = 0.63
+2.XGBoost - AC =aprox(0.62-0.63)
+3.Random Forest with Subsampling - AC = 0.628
+4.Trees - AC = 0.6162
+5.Gradient Boosting - AC = 0.61
+6.QDA - AC = 0.5939
+7.LDA - AC = 0.58
+8.Logistic Regression - AC = 0.584
+9.Naive Bayes - AC = 0.5584
+10.Penalized Logistic Regression - AC = 0.5624
+
+Conclusion:
+<br>
+Based on the comparison of various machine learning models, we observe that more complex models, like Random Forest and XGBoost, consistently outperform simpler models in terms of accuracy and AUC. These models, which are ensemble methods, seem to capture intricate patterns in the data better, leading to higher predictive performance. Random Forest, with an accuracy of 0.63, stands out as the best-performing model overall.
+
+Interestingly, Random Forest with Subsampling and XGBoost also show strong performance, with accuracies around 0.62-0.63. These models benefit from their ability to handle large datasets and complex relationships, making them more reliable for predicting outcomes in various settings.
+<br>
+In contrast, simple models like Naive Bayes and Penalized Logistic Regression perform relatively poorly, with accuracies of 0.5584 and 0.5624, respectively. This suggests that these models may struggle when dealing with more complex data, as they tend to make assumptions that don't always hold true for more complicated relationships between features.
+<br>
+Overall, the results confirm the general trend in machine learning: ensemble models, such as Random Forest and XGBoost, often yield superior performance compared to simpler algorithms due to their ability to model non-linear relationships and handle a wide variety of data types.
+<br>
+However, it's important to note that the lower-than-expected accuracy is also due to limitations in resources and time. More time, computational resources, and access to better tools would likely lead to improvements in the model's performance, but these were not available in this analysis. Thus, while the results are not optimal, they still offer valuable insights and a foundation for future work with more resources.
